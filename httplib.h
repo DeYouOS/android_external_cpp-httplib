@@ -827,6 +827,7 @@ ssize_t write_headers(Stream &strm, const Headers &headers);
 class Server {
 public:
   using Handler = std::function<void(const Request &, Response &)>;
+  using MemoryHandler = std::function<bool(const std::string &, const std::string &, const Request &, Response &)>;
 
   using ExceptionHandler =
       std::function<void(const Request &, Response &, std::exception_ptr ep)>;
@@ -865,11 +866,13 @@ public:
                     const std::string &mount_point = std::string());
   bool set_mount_point(const std::string &mount_point, const std::string &dir,
                        Headers headers = Headers());
+  bool set_mount_memory_point(const std::string &mount_point, const std::string &dir, Headers headers = Headers());
   bool remove_mount_point(const std::string &mount_point);
   Server &set_file_extension_and_mimetype_mapping(const std::string &ext,
                                                   const std::string &mime);
   Server &set_default_file_mimetype(const std::string &mime);
   Server &set_file_request_handler(Handler handler);
+  Server &set_file_request_memory_handler(MemoryHandler handler);
 
   Server &set_error_handler(HandlerWithResponse handler);
   Server &set_error_handler(Handler handler);
@@ -991,11 +994,13 @@ private:
     std::string mount_point;
     std::string base_dir;
     Headers headers;
+    bool isMemory;
   };
   std::vector<MountPointEntry> base_dirs_;
   std::map<std::string, std::string> file_extension_and_mimetype_map_;
   std::string default_file_mimetype_ = "application/octet-stream";
   Handler file_request_handler_;
+  MemoryHandler file_request_memory_handler_;
 
   Handlers get_handlers_;
   Handlers post_handlers_;
@@ -5765,9 +5770,19 @@ inline bool Server::set_mount_point(const std::string &mount_point,
   if (detail::is_dir(dir)) {
     std::string mnt = !mount_point.empty() ? mount_point : "/";
     if (!mnt.empty() && mnt[0] == '/') {
-      base_dirs_.push_back({mnt, dir, std::move(headers)});
+      base_dirs_.push_back({mnt, dir, std::move(headers), false});
       return true;
     }
+  }
+  return false;
+}
+
+inline bool Server::set_mount_memory_point(const std::string &mount_point,
+                                      const std::string &dir, Headers headers) {
+  std::string mnt = !mount_point.empty() ? mount_point : "/";
+  if (!mnt.empty() && mnt[0] == '/') {
+    base_dirs_.push_back({mnt, dir, std::move(headers), true});
+    return true;
   }
   return false;
 }
@@ -5796,6 +5811,11 @@ inline Server &Server::set_default_file_mimetype(const std::string &mime) {
 
 inline Server &Server::set_file_request_handler(Handler handler) {
   file_request_handler_ = std::move(handler);
+  return *this;
+}
+
+inline Server &Server::set_file_request_memory_handler(MemoryHandler handler) {
+  file_request_memory_handler_ = std::move(handler);
   return *this;
 }
 
@@ -6252,7 +6272,18 @@ inline bool Server::handle_file_request(const Request &req, Response &res,
       if (detail::is_valid_path(sub_path)) {
         auto path = entry.base_dir + sub_path;
         if (path.back() == '/') { path += "index.html"; }
-
+        if(entry.isMemory && file_request_memory_handler_(path, 
+        detail::find_content_type(path, file_extension_and_mimetype_map_,
+        default_file_mimetype_), req, res))
+        {
+          for (const auto &kv : entry.headers) {
+            res.set_header(kv.first, kv.second);
+          }
+          if (!head && file_request_handler_) {
+            file_request_handler_(req, res);
+          }
+          return true;
+        }
         if (detail::is_file(path)) {
           for (const auto &kv : entry.headers) {
             res.set_header(kv.first, kv.second);
